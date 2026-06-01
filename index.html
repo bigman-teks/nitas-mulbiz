@@ -45,10 +45,32 @@
   // ── Auth state listener ──────────────────────────────
   onAuthStateChanged(auth, async (user) => {
     if (user) {
-      const snap = await getDoc(doc(db, "users", user.uid));
-      const userData = snap.exists() ? snap.data() : {};
-      window._currentUser = { ...user, ...userData };
-      window._isAdmin = userData.role === "admin";
+      try {
+        const userRef = doc(db, "users", user.uid);
+        const snap = await getDoc(userRef);
+        let userData = {};
+        if (snap.exists()) {
+          userData = snap.data();
+        } else {
+          // Auto-create user doc if missing (e.g. created via Firebase Console)
+          userData = {
+            name: user.displayName || user.email.split('@')[0],
+            email: user.email,
+            phone: '',
+            role: 'user',
+            status: 'active',
+            createdAt: serverTimestamp()
+          };
+          await setDoc(userRef, userData);
+        }
+        window._currentUser = { ...user, ...userData };
+        window._isAdmin = (userData.role === "admin");
+        console.log("Auth ready | uid:", user.uid, "| role:", userData.role, "| isAdmin:", window._isAdmin);
+      } catch(e) {
+        console.error("Firestore user fetch failed:", e.code, e.message);
+        window._currentUser = { ...user };
+        window._isAdmin = false;
+      }
       onUserReady();
     } else {
       window._currentUser = null;
@@ -600,7 +622,16 @@ nav{background:var(--black);display:flex;align-items:center;justify-content:spac
     <div class="ico">🔐</div>
     <h2>Admin Access Only</h2>
     <p>You need admin privileges to access this panel.</p>
-    <button class="btn btn-gold" onclick="openAuthModal()">Sign In</button>
+    <div id="admin-debug-info" style="background:#f5f3ee;border-radius:10px;padding:14px;margin:16px auto;max-width:380px;font-size:13px;text-align:left;display:none">
+      <strong>Debug Info:</strong><br/>
+      <span id="debug-uid"></span><br/>
+      <span id="debug-role"></span><br/>
+      <span id="debug-isadmin"></span>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+      <button class="btn btn-gold" onclick="openAuthModal()">Sign In</button>
+      <button class="btn btn-outline" onclick="debugAdminCheck()" style="font-size:13px">🔍 Check My Role</button>
+    </div>
   </div>
 
   <!-- Admin content (shown only if admin) -->
@@ -1206,7 +1237,29 @@ async function loadUserDash() {
 // ───────────────────────────────────────────────────
 //  Admin Panel
 // ───────────────────────────────────────────────────
-function checkAdminAccess() {
+async function checkAdminAccess() {
+  // Always re-fetch from Firestore to get latest role
+  if (!window._currentUser) {
+    document.getElementById('admin-lock').style.display = 'block';
+    document.getElementById('admin-panel').style.display = 'none';
+    return;
+  }
+  try {
+    const { db, doc, getDoc } = window._fb;
+    const snap = await getDoc(doc(db, 'users', window._currentUser.uid));
+    if (snap.exists()) {
+      const role = snap.data().role;
+      window._isAdmin = (role === 'admin');
+      console.log("Admin check | role from Firestore:", role);
+    } else {
+      console.warn("No user doc found in Firestore for uid:", window._currentUser.uid);
+      window._isAdmin = false;
+    }
+  } catch(e) {
+    console.error("Admin check failed:", e.code, e.message);
+    window._isAdmin = false;
+  }
+
   if (window._isAdmin) {
     document.getElementById('admin-lock').style.display = 'none';
     document.getElementById('admin-panel').style.display = 'block';
@@ -1214,6 +1267,7 @@ function checkAdminAccess() {
   } else {
     document.getElementById('admin-lock').style.display = 'block';
     document.getElementById('admin-panel').style.display = 'none';
+    toast('⚠️ Admin access denied. Make sure role is set to "admin" in Firestore.');
   }
 }
 
@@ -1519,6 +1573,49 @@ document.querySelectorAll('.services-strip .svc-pill').forEach(p => {
     this.classList.add('active');
   };
 });
+
+// ───────────────────────────────────────────────────
+//  Admin Debug Helper
+// ───────────────────────────────────────────────────
+async function debugAdminCheck() {
+  const info = document.getElementById('admin-debug-info');
+  info.style.display = 'block';
+
+  if (!window._currentUser) {
+    document.getElementById('debug-uid').innerHTML = '❌ Not signed in';
+    document.getElementById('debug-role').innerHTML = '';
+    document.getElementById('debug-isadmin').innerHTML = '';
+    toast('You are not signed in. Please sign in first.');
+    return;
+  }
+
+  const uid = window._currentUser.uid;
+  document.getElementById('debug-uid').innerHTML = `UID: <code style="background:#e8e6e0;padding:2px 6px;border-radius:4px">${uid}</code>`;
+
+  try {
+    const { db, doc, getDoc } = window._fb;
+    const snap = await getDoc(doc(db, 'users', uid));
+    if (snap.exists()) {
+      const data = snap.data();
+      const role = data.role || '(no role field set)';
+      const isAdmin = role === 'admin';
+      document.getElementById('debug-role').innerHTML = `Role in Firestore: <strong style="color:${isAdmin?'green':'red'}">${role}</strong>`;
+      document.getElementById('debug-isadmin').innerHTML = isAdmin
+        ? '✅ Should have admin access. Try clicking Admin again.'
+        : `❌ Role must be exactly <code style="background:#e8e6e0;padding:2px 6px;border-radius:4px">admin</code> — go to Firestore and fix it.`;
+      if (isAdmin) {
+        window._isAdmin = true;
+        setTimeout(() => checkAdminAccess(), 800);
+      }
+    } else {
+      document.getElementById('debug-role').innerHTML = '❌ No user document found in Firestore';
+      document.getElementById('debug-isadmin').innerHTML = `Go to <a href="https://console.firebase.google.com/project/nitas-3db1a/firestore" target="_blank" style="color:var(--gold-dark)">Firestore Console</a> → users collection → create doc with ID: <code style="background:#e8e6e0;padding:2px 4px;border-radius:4px">${uid}</code> and add field <code style="background:#e8e6e0;padding:2px 4px;border-radius:4px">role: "admin"</code>`;
+    }
+  } catch(e) {
+    document.getElementById('debug-role').innerHTML = `❌ Firestore error: ${e.message}`;
+    document.getElementById('debug-isadmin').innerHTML = 'Check that Firestore is enabled and rules are deployed.';
+  }
+}
 
 // ───────────────────────────────────────────────────
 //  Init (products loaded after auth state resolves)
