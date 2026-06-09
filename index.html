@@ -2008,41 +2008,57 @@ async function addProduct() {
   const btn = document.querySelector('#add-product-form .btn-gold');
   btn.textContent = 'Saving…'; btn.disabled = true;
 
+  // ── Step 1: Try image upload (never blocks save) ──
   try {
-    // Handle image upload
     const imageFile = document.getElementById('np-image').files[0];
     if (imageFile) {
-      const reader = new FileReader();
+      btn.textContent = 'Uploading image…';
       const base64 = await new Promise((res, rej) => {
+        const reader = new FileReader();
         reader.onload = e => res(e.target.result);
-        reader.onerror = rej;
+        reader.onerror = () => rej(new Error('Could not read file'));
         reader.readAsDataURL(imageFile);
       });
-      try {
-        const imgRef = ref(storage, `products/${Date.now()}_${imageFile.name.replace(/\s+/g,'_')}`);
-        await uploadString(imgRef, base64, 'data_url');
-        prod.imageUrl = await getDownloadURL(imgRef);
-      } catch(se) {
-        console.warn('Storage upload failed, saving without image:', se.message);
-        // Continue without image if storage not configured
-      }
-    }
 
+      // Race upload against a 10-second timeout
+      const uploadWithTimeout = new Promise(async (res, rej) => {
+        const timer = setTimeout(() => rej(new Error('Upload timed out — check Firebase Storage rules')), 10000);
+        try {
+          const imgRef = ref(storage, `products/${Date.now()}_${imageFile.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`);
+          await uploadString(imgRef, base64, 'data_url');
+          prod.imageUrl = await getDownloadURL(imgRef);
+          clearTimeout(timer);
+          res();
+        } catch(e) { clearTimeout(timer); rej(e); }
+      });
+
+      await uploadWithTimeout;
+    }
+  } catch(imgErr) {
+    console.warn('Image upload skipped:', imgErr.message);
+    toast('⚠️ ' + imgErr.message + '. Saving without image…');
+    await new Promise(r => setTimeout(r, 1800));
+  }
+
+  // ── Step 2: Save product to Firestore (always runs) ──
+  btn.textContent = 'Saving…';
+  try {
     if (editId) {
-      await updateDoc(doc(db,'products',editId), prod);
+      await updateDoc(doc(db, 'products', editId), prod);
       toast('Product updated! ✅');
     } else {
       prod.createdAt = serverTimestamp();
-      await addDoc(collection(db,'products'), prod);
+      await addDoc(collection(db, 'products'), prod);
       toast('Product added! ✅');
     }
     toggleAddProductForm();
     loadAdminProducts();
     loadProducts();
   } catch(e) {
-    toast('Error saving product: ' + e.message);
-    console.error(e);
+    toast('Error saving to Firestore: ' + e.message);
+    console.error('Firestore save error:', e);
   }
+
   btn.textContent = '💾 Save Product'; btn.disabled = false;
 }
 
